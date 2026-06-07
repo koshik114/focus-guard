@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 from PySide6.QtCore import QThread, QTimer, Signal
@@ -44,6 +45,9 @@ from focus_guard.ui.reminder_dialog import ReminderDialog
 from focus_guard.ui.settings_dialog import SettingsDialog
 
 
+SIMILAR_FALSE_POSITIVE_COOLDOWN_MINUTES = 15
+
+
 class DetectionWorker(QThread):
     finished_event = Signal(object)
     failed = Signal(str)
@@ -60,6 +64,24 @@ class DetectionWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class DeepSeekReviewWorker(QThread):
+    finished_review = Signal(object, object, object)
+
+    def __init__(self, router: LlmRouter, event: DetectionEvent, note: str | None) -> None:
+        super().__init__()
+        self.router = router
+        self.event = event
+        self.note = note
+
+    def run(self) -> None:
+        judgment = self.router.review_with_deepseek(
+            task=self.event.task,
+            window=self.event.window,
+            ocr=self.event.ocr,
+        )
+        self.finished_review.emit(self.event, judgment, self.note)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config: AppConfig, store: EventStore) -> None:
         super().__init__()
@@ -70,7 +92,11 @@ class MainWindow(QMainWindow):
         self.current_task: FocusTask | None = None
         self.session_ends_at: datetime | None = None
         self.pause_until: datetime | None = None
+        self.suppressed_reminder_signature: tuple[str, str, str] | None = None
+        self.suppressed_reminder_until: datetime | None = None
+        self.next_detection_at: datetime | None = None
         self.worker: DetectionWorker | None = None
+        self.deepseek_review_worker: DeepSeekReviewWorker | None = None
         self.task_templates: dict[int, TaskTemplate] = {}
 
         self.setWindowTitle("Focus Guard")
@@ -79,6 +105,11 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.setInterval(self.config.check_interval_seconds * 1000)
         self.timer.timeout.connect(self._run_detection)
+
+        self.countdown_timer = QTimer(self)
+        self.countdown_timer.setInterval(1000)
+        self.countdown_timer.timeout.connect(self._update_countdown)
+        self.countdown_timer.start()
 
         self._build_ui()
         self._build_tray()
@@ -159,7 +190,7 @@ class MainWindow(QMainWindow):
         metrics.addWidget(self._make_metric_card("视觉输入", self.metric_vision_value), 1)
 
         self.metric_next_value = QLabel(f"{self.config.check_interval_seconds}s")
-        metrics.addWidget(self._make_metric_card("检测周期", self.metric_next_value), 1)
+        metrics.addWidget(self._make_metric_card("下次检测", self.metric_next_value), 1)
 
         session_panel = QFrame()
         session_panel.setObjectName("Panel")
@@ -291,6 +322,44 @@ class MainWindow(QMainWindow):
         self.metric_vision_value.setText(self.config.vision_mode)
         self.metric_next_value.setText(f"{self.config.check_interval_seconds}s")
         self.interval_label.setText(f"每 {self.config.check_interval_seconds} 秒检测一次")
+        if self.current_task is not None:
+            self._schedule_next_detection()
+
+    def _schedule_next_detection(self) -> None:
+        self.next_detection_at = datetime.now().astimezone() + timedelta(
+            seconds=self.config.check_interval_seconds
+        )
+        self._update_countdown()
+
+    def _update_countdown(self) -> None:
+        now = datetime.now().astimezone()
+        if self.current_task is None:
+            self.metric_next_value.setText(f"{self.config.check_interval_seconds}s")
+            return
+        if self.pause_until and now < self.pause_until:
+            self.metric_next_value.setText(f"暂停 {self._format_remaining(self.pause_until - now)}")
+            return
+        if self.worker and self.worker.isRunning():
+            self.metric_next_value.setText("检测中")
+            return
+        if self.next_detection_at is None:
+            self._schedule_next_detection()
+            return
+
+        remaining = self.next_detection_at - now
+        if remaining.total_seconds() <= 0:
+            self.metric_next_value.setText("即将检测")
+            return
+        self.metric_next_value.setText(self._format_remaining(remaining))
+
+    @staticmethod
+    def _format_remaining(delta: timedelta) -> str:
+        total_seconds = max(0, int(delta.total_seconds()))
+        minutes, seconds = divmod(total_seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes:02d}:{seconds:02d}"
 
     def _refresh_task_templates(self) -> None:
         templates = self.store.list_task_templates(40)
@@ -445,6 +514,9 @@ class MainWindow(QMainWindow):
             datetime.now().astimezone() + timedelta(minutes=duration) if duration else None
         )
         self.pause_until = None
+        self.suppressed_reminder_signature = None
+        self.suppressed_reminder_until = None
+        self.next_detection_at = None
 
         try:
             self.store.record_task_used(description, duration)
@@ -469,6 +541,7 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(True)
         self.check_now_button.setEnabled(True)
         self._set_state("已开始", "StatusBadgeActive")
+        self._schedule_next_detection()
         self.last_result_label.setText(
             "任务已开始。请切换到目标任务窗口；首次自动检测将在下一个周期执行。"
         )
@@ -478,6 +551,9 @@ class MainWindow(QMainWindow):
         self.current_task = None
         self.session_ends_at = None
         self.pause_until = None
+        self.suppressed_reminder_signature = None
+        self.suppressed_reminder_until = None
+        self.next_detection_at = None
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.check_now_button.setEnabled(False)
@@ -499,20 +575,31 @@ class MainWindow(QMainWindow):
             return
 
         self._set_state("检测中...", "StatusBadgeActive")
+        self.next_detection_at = None
+        self.timer.start(self.config.check_interval_seconds * 1000)
         self.worker = DetectionWorker(self.detector, self.current_task)
         self.worker.finished_event.connect(self._handle_detection_event)
         self.worker.failed.connect(self._handle_detection_error)
         self.worker.start()
 
     def _handle_detection_event(self, event: DetectionEvent) -> None:
+        deepseek_review_request: tuple[DetectionEvent, str | None] | None = None
         if event.judgment.status is FocusStatus.DISTRACTED:
-            dialog = ReminderDialog(event, self)
-            dialog.exec()
-            result = dialog.reminder_result
-            if result:
-                self.store.add_feedback(event, result.feedback, result.note)
-                if result.feedback is FeedbackType.PAUSED:
-                    self.pause_until = datetime.now().astimezone() + timedelta(minutes=5)
+            signature = self._reminder_signature(event)
+            now = datetime.now().astimezone()
+            if self._is_similar_reminder_suppressed(signature, now):
+                self.store.add_event(replace(event, reminder_shown=False))
+            else:
+                dialog = ReminderDialog(event, self)
+                dialog.exec()
+                result = dialog.reminder_result
+                if result:
+                    self.store.add_feedback(event, result.feedback, result.note)
+                    if result.feedback is FeedbackType.PAUSED:
+                        self.pause_until = now + timedelta(minutes=5)
+                    elif result.feedback is FeedbackType.FALSE_POSITIVE:
+                        self._suppress_similar_reminders(signature, now)
+                        deepseek_review_request = (event, result.note)
         else:
             self.store.add_event(event)
 
@@ -535,10 +622,87 @@ class MainWindow(QMainWindow):
         )
         self.ocr_preview.setPlainText(event.ocr.text[:3000])
         self._refresh_recent_events()
+        if self.current_task is not None:
+            self._schedule_next_detection()
+        if deepseek_review_request is not None:
+            self._start_deepseek_review(*deepseek_review_request)
+
+    @staticmethod
+    def _reminder_signature(event: DetectionEvent) -> tuple[str, str, str]:
+        return (
+            event.task.description.strip().lower(),
+            event.window.process_name.strip().lower(),
+            event.window.window_title.strip().lower(),
+        )
+
+    def _is_similar_reminder_suppressed(
+        self,
+        signature: tuple[str, str, str],
+        now: datetime,
+    ) -> bool:
+        return (
+            self.suppressed_reminder_signature == signature
+            and self.suppressed_reminder_until is not None
+            and now < self.suppressed_reminder_until
+        )
+
+    def _suppress_similar_reminders(
+        self,
+        signature: tuple[str, str, str],
+        now: datetime,
+    ) -> None:
+        self.suppressed_reminder_signature = signature
+        self.suppressed_reminder_until = now + timedelta(
+            minutes=SIMILAR_FALSE_POSITIVE_COOLDOWN_MINUTES
+        )
+
+    def _start_deepseek_review(self, event: DetectionEvent, note: str | None) -> None:
+        if not self.config.deepseek_api_key:
+            self.last_result_label.setText(
+                "误判已记录；DeepSeek API Key 未配置，未进行云端复核。"
+            )
+            return
+        if self.deepseek_review_worker and self.deepseek_review_worker.isRunning():
+            self.last_result_label.setText("误判已记录；已有 DeepSeek 复核任务正在运行。")
+            return
+
+        self.deepseek_review_worker = DeepSeekReviewWorker(
+            router=LlmRouter(self.config),
+            event=event,
+            note=note,
+        )
+        self.deepseek_review_worker.finished_review.connect(self._handle_deepseek_review)
+        self.deepseek_review_worker.start()
+        self.last_result_label.setText("误判已记录；正在调用 DeepSeek 复核本次判断。")
+
+    def _handle_deepseek_review(
+        self,
+        original_event: DetectionEvent,
+        judgment,
+        note: str | None,
+    ) -> None:
+        feedback_note = "DeepSeek 误判复核"
+        if note:
+            feedback_note = f"{feedback_note}；用户说明：{note}"
+        review_event = replace(
+            original_event,
+            judgment=judgment,
+            reminder_shown=False,
+            user_feedback=FeedbackType.FALSE_POSITIVE,
+            feedback_note=feedback_note,
+        )
+        self.store.add_event(review_event)
+        self.last_result_label.setText(
+            f"DeepSeek 复核完成：{judgment.status.value} | "
+            f"{judgment.confidence:.2f}\n{judgment.reason}"
+        )
+        self._refresh_recent_events()
 
     def _handle_detection_error(self, message: str) -> None:
         self._set_state("检测失败", "StatusBadgeWarn")
         self.last_result_label.setText(message)
+        if self.current_task is not None:
+            self._schedule_next_detection()
 
     def _refresh_recent_events(self) -> None:
         rows = self.store.list_recent(30)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -13,11 +13,13 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QSpinBox,
     QVBoxLayout,
 )
 
 from focus_guard.config import AppConfig
+from focus_guard.services.llm import test_deepseek_connection
 
 
 @dataclass(frozen=True)
@@ -50,9 +52,32 @@ class SettingsValues:
         }
 
 
+class DeepSeekConnectionWorker(QThread):
+    finished_test = Signal(bool, str)
+
+    def __init__(self, api_key: str, base_url: str, model: str) -> None:
+        super().__init__()
+        self.api_key = api_key
+        self.base_url = base_url
+        self.model = model
+
+    def run(self) -> None:
+        try:
+            message = test_deepseek_connection(
+                api_key=self.api_key,
+                base_url=self.base_url,
+                model=self.model,
+            )
+        except Exception as exc:  # noqa: BLE001 - GUI boundary should surface connection errors.
+            self.finished_test.emit(False, str(exc))
+            return
+        self.finished_test.emit(True, message)
+
+
 class SettingsDialog(QDialog):
     def __init__(self, config: AppConfig, parent=None) -> None:
         super().__init__(parent)
+        self.deepseek_test_worker: DeepSeekConnectionWorker | None = None
         self.setWindowTitle("Focus Guard 设置")
         self.setMinimumWidth(680)
         self.setModal(True)
@@ -94,6 +119,17 @@ class SettingsDialog(QDialog):
 
         self.deepseek_model = QLineEdit(config.deepseek_model)
         model_form.addRow("DeepSeek 模型", self.deepseek_model)
+
+        deepseek_test_row = QHBoxLayout()
+        self.deepseek_test_button = QPushButton("测试 DeepSeek")
+        self.deepseek_test_button.clicked.connect(self._test_deepseek)
+        deepseek_test_row.addWidget(self.deepseek_test_button)
+
+        self.deepseek_test_label = QLabel("未测试")
+        self.deepseek_test_label.setObjectName("Muted")
+        self.deepseek_test_label.setWordWrap(True)
+        deepseek_test_row.addWidget(self.deepseek_test_label, 1)
+        model_form.addRow("连通性", deepseek_test_row)
         grid.addWidget(model_panel, 0, 0)
 
         runtime_panel, runtime_form = self._panel_with_form("检测")
@@ -188,3 +224,26 @@ class SettingsDialog(QDialog):
             vision_max_image_side=self.vision_max_side.value(),
             vision_jpeg_quality=self.vision_quality.value(),
         )
+
+    def _test_deepseek(self) -> None:
+        values = self.values()
+        if not values.deepseek_api_key:
+            self.deepseek_test_label.setText("DeepSeek API Key 为空")
+            return
+        if self.deepseek_test_worker and self.deepseek_test_worker.isRunning():
+            return
+
+        self.deepseek_test_button.setEnabled(False)
+        self.deepseek_test_label.setText("正在测试...")
+        self.deepseek_test_worker = DeepSeekConnectionWorker(
+            api_key=values.deepseek_api_key,
+            base_url=values.deepseek_base_url,
+            model=values.deepseek_model,
+        )
+        self.deepseek_test_worker.finished_test.connect(self._handle_deepseek_test_result)
+        self.deepseek_test_worker.start()
+
+    def _handle_deepseek_test_result(self, ok: bool, message: str) -> None:
+        self.deepseek_test_button.setEnabled(True)
+        prefix = "连通正常" if ok else "连接失败"
+        self.deepseek_test_label.setText(f"{prefix}：{message}")

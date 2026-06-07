@@ -22,6 +22,39 @@ JSON 格式：
 """
 
 
+def test_deepseek_connection(
+    api_key: str,
+    base_url: str,
+    model: str,
+    timeout_seconds: int = 20,
+) -> str:
+    if not api_key.strip():
+        raise ValueError("DeepSeek API Key 为空")
+
+    payload = {
+        "model": model.strip() or "deepseek-chat",
+        "messages": [
+            {"role": "system", "content": "你是一个连通性测试助手。"},
+            {"role": "user", "content": "只输出 ok。"},
+        ],
+        "temperature": 0,
+        "max_tokens": 8,
+    }
+    response = requests.post(
+        f"{base_url.strip().rstrip('/')}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key.strip()}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+    content = data["choices"][0]["message"]["content"]
+    return f"DeepSeek 连通正常，模型返回：{content.strip()[:40]}"
+
+
 @dataclass(frozen=True)
 class LlmRouter:
     config: AppConfig
@@ -54,6 +87,39 @@ class LlmRouter:
                     raw_response=str(exc),
                 )
         return ollama_result
+
+    def review_with_deepseek(
+        self,
+        task: FocusTask,
+        window: WindowSnapshot,
+        ocr: OcrSnapshot,
+    ) -> ModelJudgment:
+        if not self.config.deepseek_api_key:
+            return ModelJudgment(
+                status=FocusStatus.UNCERTAIN,
+                confidence=0.0,
+                reason="DeepSeek API Key 未配置，无法进行误判复核",
+                provider="deepseek-review",
+                raw_response="",
+            )
+        try:
+            result = self._judge_with_deepseek(task, window, ocr)
+        except requests.RequestException as exc:
+            return ModelJudgment(
+                status=FocusStatus.UNCERTAIN,
+                confidence=0.0,
+                reason=f"DeepSeek 误判复核失败：{exc}",
+                provider="deepseek-review",
+                raw_response=str(exc),
+            )
+        return ModelJudgment(
+            status=result.status,
+            confidence=result.confidence,
+            reason=result.reason,
+            provider="deepseek-review",
+            raw_response=result.raw_response,
+            used_vision=result.used_vision,
+        )
 
     def _should_use_vision(
         self,

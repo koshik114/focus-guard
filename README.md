@@ -10,6 +10,8 @@ classifier. The first version prioritizes local privacy and low recurring cost.
 - Platform: Windows desktop.
 - Runtime: source-based Python application; no `.exe` packaging in phase 1.
 - Check cadence: default 60 seconds.
+- Countdown: the main dashboard shows the remaining time before the next
+  automatic detection.
 - Capture scope: foreground window region on one monitor, with primary monitor
   fallback.
 - OCR: RapidOCR first, with an interface that allows PaddleOCR later.
@@ -23,9 +25,16 @@ classifier. The first version prioritizes local privacy and low recurring cost.
 - Cloud fallback: DeepSeek only when Ollama is unavailable or returns
   `uncertain`.
 - Reminder: modal, always-on-top dialog requiring explicit feedback.
+- False-positive cooldown: choosing "这是误判" suppresses the same
+  task/process/window reminder for 15 minutes while detection logs continue.
+- DeepSeek review: when "这是误判" is selected and `DEEPSEEK_API_KEY` is
+  configured, DeepSeek rechecks the same event in the background and stores a
+  `deepseek-review` log row.
 - Tray: closing the main window minimizes the app to the system tray.
 - Settings: the GUI can edit runtime model, OCR, interval, vision, and DeepSeek
   fallback settings. Saved settings are written to local `.env`.
+- DeepSeek connectivity test: the Settings dialog can verify whether the
+  configured DeepSeek API Key, base URL, and model are reachable.
 - Task templates: started tasks are recorded as local history, and the GUI can
   reuse, save, or delete task templates.
 
