@@ -135,7 +135,7 @@ def apply_light_theme(app: QApplication) -> None:
             border-radius: 8px;
         }
 
-        QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox {
+        QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox {
             background: #ffffff;
             border: 1px solid #d9d9df;
             border-radius: 6px;
@@ -143,8 +143,22 @@ def apply_light_theme(app: QApplication) -> None:
             selection-background-color: #dbeafe;
         }
 
-        QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QSpinBox:focus {
+        QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QSpinBox:focus,
+        QComboBox:focus {
             border: 1px solid #8bb4f8;
+        }
+
+        QComboBox::drop-down {
+            border: 0;
+            width: 24px;
+        }
+
+        QComboBox QAbstractItemView {
+            background: #ffffff;
+            border: 1px solid #d9d9df;
+            selection-background-color: #eef2ff;
+            selection-color: #18181b;
+            padding: 4px;
         }
 
         QPushButton {

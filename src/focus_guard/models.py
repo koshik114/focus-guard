@@ -24,6 +24,16 @@ class FocusTask:
 
 
 @dataclass(frozen=True)
+class TaskTemplate:
+    id: int
+    description: str
+    default_duration_minutes: int | None
+    use_count: int
+    updated_at: datetime
+    last_used_at: datetime | None
+
+
+@dataclass(frozen=True)
 class WindowSnapshot:
     captured_at: datetime
     app_name: str

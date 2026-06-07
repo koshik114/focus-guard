@@ -26,6 +26,8 @@ classifier. The first version prioritizes local privacy and low recurring cost.
 - Tray: closing the main window minimizes the app to the system tray.
 - Settings: the GUI can edit runtime model, OCR, interval, vision, and DeepSeek
   fallback settings. Saved settings are written to local `.env`.
+- Task templates: started tasks are recorded as local history, and the GUI can
+  reuse, save, or delete task templates.
 
 ## Setup
 
@@ -54,6 +56,10 @@ Copy-Item .env.example .env
 Then edit `.env` if needed. `.env` is ignored by Git.
 
 Most runtime settings can also be edited from the app's Settings dialog.
+
+The task panel also includes a local history/template selector. Starting a task
+records it for later reuse; pressing "保存模板" updates the saved default
+duration for the current task.
 
 ## Run
 
@@ -99,6 +105,9 @@ window screenshot is resized, JPEG-compressed, encoded in memory, sent to local
 Ollama, and then discarded. The database stores only OCR text and judgment
 metadata under `data/`, which is ignored by Git.
 
+Task templates are stored in the same local SQLite database. They contain task
+descriptions, optional default durations, use counts, and last-used timestamps.
+
 False-positive notes are saved because they are useful for later evaluation and
 possible local-model fine-tuning dataset construction.
 
@@ -117,14 +126,15 @@ src/focus_guard/
 │   └── detector.py        # one detection cycle
 └── ui/
     ├── main_window.py     # GUI, timer, tray, log table
+    ├── settings_dialog.py # runtime settings dialog
     ├── reminder_dialog.py # forced manual confirmation dialog
     └── theme.py           # light modern QSS theme
 ```
 
 ## Next Implementation Steps
 
-1. Add task templates and historical task reuse.
-2. Add export for fine-tuning/evaluation JSONL.
-3. Add optional PaddleOCR backend when RapidOCR accuracy is insufficient.
-4. Add evaluation reports for false positives and false negatives.
-5. Add single-instance protection and packaging for daily use.
+1. Add export for fine-tuning/evaluation JSONL.
+2. Add optional PaddleOCR backend when RapidOCR accuracy is insufficient.
+3. Add evaluation reports for false positives and false negatives.
+4. Add single-instance protection and packaging for daily use.
+5. Add richer per-task rules, such as allowed apps and task keywords.

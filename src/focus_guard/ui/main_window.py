@@ -6,6 +6,7 @@ from PySide6.QtCore import QThread, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -28,7 +29,13 @@ from PySide6.QtWidgets import (
 )
 
 from focus_guard.config import AppConfig, write_env_settings
-from focus_guard.models import DetectionEvent, FeedbackType, FocusStatus, FocusTask
+from focus_guard.models import (
+    DetectionEvent,
+    FeedbackType,
+    FocusStatus,
+    FocusTask,
+    TaskTemplate,
+)
 from focus_guard.services.detector import FocusDetector
 from focus_guard.services.llm import LlmRouter
 from focus_guard.services.ocr import OcrEngine, build_ocr_engine
@@ -64,9 +71,10 @@ class MainWindow(QMainWindow):
         self.session_ends_at: datetime | None = None
         self.pause_until: datetime | None = None
         self.worker: DetectionWorker | None = None
+        self.task_templates: dict[int, TaskTemplate] = {}
 
         self.setWindowTitle("Focus Guard")
-        self.resize(1120, 720)
+        self.resize(1180, 820)
 
         self.timer = QTimer(self)
         self.timer.setInterval(self.config.check_interval_seconds * 1000)
@@ -75,6 +83,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_tray()
         self._refresh_recent_events()
+        self._refresh_task_templates()
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -90,20 +99,6 @@ class MainWindow(QMainWindow):
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(20, 20, 20, 20)
         sidebar_layout.setSpacing(16)
-
-        title = QLabel("Focus Guard")
-        title.setObjectName("AppTitle")
-        sidebar_layout.addWidget(title)
-
-        subtitle = QLabel("本地优先的专注状态检测器")
-        subtitle.setObjectName("Muted")
-        subtitle.setWordWrap(True)
-        sidebar_layout.addWidget(subtitle)
-
-        local_badge = QLabel("OCR + Ollama + 视觉兜底")
-        local_badge.setObjectName("SoftBadge")
-        sidebar_layout.addWidget(local_badge)
-        sidebar_layout.addSpacing(10)
 
         self.status_label = QLabel("未开始")
         self.status_label.setObjectName("StatusBadgeIdle")
@@ -183,36 +178,53 @@ class MainWindow(QMainWindow):
         self.task_edit.setFixedHeight(92)
         session_layout.addWidget(self.task_edit, 1, 0, 1, 4)
 
+        self.template_combo = QComboBox()
+        self.template_combo.setMinimumContentsLength(28)
+        session_layout.addWidget(self.template_combo, 2, 0)
+
+        self.use_template_button = QPushButton("使用")
+        self.use_template_button.clicked.connect(self._use_selected_template)
+        session_layout.addWidget(self.use_template_button, 2, 1)
+
+        self.save_template_button = QPushButton("保存模板")
+        self.save_template_button.clicked.connect(self._save_current_template)
+        session_layout.addWidget(self.save_template_button, 2, 2)
+
+        self.delete_template_button = QPushButton("删除")
+        self.delete_template_button.clicked.connect(self._delete_selected_template)
+        session_layout.addWidget(self.delete_template_button, 2, 3)
+
         self.duration_enabled = QCheckBox("设置持续时间")
-        session_layout.addWidget(self.duration_enabled, 2, 0)
+        session_layout.addWidget(self.duration_enabled, 3, 0)
 
         self.duration_spin = QSpinBox()
         self.duration_spin.setRange(5, 480)
         self.duration_spin.setValue(60)
         self.duration_spin.setSuffix(" 分钟")
-        session_layout.addWidget(self.duration_spin, 2, 1)
+        session_layout.addWidget(self.duration_spin, 3, 1)
 
         self.interval_label = QLabel(f"每 {self.config.check_interval_seconds} 秒检测一次")
         self.interval_label.setObjectName("Muted")
-        session_layout.addWidget(self.interval_label, 2, 2)
+        session_layout.addWidget(self.interval_label, 3, 2, 1, 2)
 
         self.start_button = QPushButton("开始")
         self.start_button.setObjectName("PrimaryButton")
         self.start_button.clicked.connect(self._start_session)
-        session_layout.addWidget(self.start_button, 3, 0)
+        session_layout.addWidget(self.start_button, 4, 0)
 
         self.stop_button = QPushButton("停止")
         self.stop_button.clicked.connect(self._stop_session)
         self.stop_button.setEnabled(False)
-        session_layout.addWidget(self.stop_button, 3, 1)
+        session_layout.addWidget(self.stop_button, 4, 1)
 
         self.check_now_button = QPushButton("立即检测")
         self.check_now_button.clicked.connect(self._run_detection)
         self.check_now_button.setEnabled(False)
-        session_layout.addWidget(self.check_now_button, 3, 2)
+        session_layout.addWidget(self.check_now_button, 4, 2)
 
         status_panel = QFrame()
         status_panel.setObjectName("Panel")
+        status_panel.setMaximumHeight(250)
         status_layout = QGridLayout(status_panel)
         status_layout.setContentsMargins(20, 18, 20, 18)
         status_layout.setVerticalSpacing(12)
@@ -230,7 +242,7 @@ class MainWindow(QMainWindow):
         self.ocr_preview = QPlainTextEdit()
         self.ocr_preview.setPlaceholderText("OCR 文本只保存在本地日志中，可用于后续误判分析和微调数据整理。")
         self.ocr_preview.setReadOnly(True)
-        self.ocr_preview.setFixedHeight(120)
+        self.ocr_preview.setFixedHeight(88)
         status_layout.addWidget(self.ocr_preview, 2, 0)
 
         table_title = QLabel("检测日志")
@@ -243,7 +255,8 @@ class MainWindow(QMainWindow):
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        content.addWidget(self.table, 1)
+        self.table.setMinimumHeight(260)
+        content.addWidget(self.table, 3)
 
     def _make_metric_card(self, label: str, value_label: QLabel) -> QFrame:
         card = QFrame()
@@ -278,6 +291,89 @@ class MainWindow(QMainWindow):
         self.metric_vision_value.setText(self.config.vision_mode)
         self.metric_next_value.setText(f"{self.config.check_interval_seconds}s")
         self.interval_label.setText(f"每 {self.config.check_interval_seconds} 秒检测一次")
+
+    def _refresh_task_templates(self) -> None:
+        templates = self.store.list_task_templates(40)
+        self.task_templates = {template.id: template for template in templates}
+
+        self.template_combo.clear()
+        if not templates:
+            self.template_combo.addItem("暂无历史任务或模板", None)
+            self.use_template_button.setEnabled(False)
+            self.delete_template_button.setEnabled(False)
+            return
+
+        self.template_combo.addItem("选择历史任务或模板", None)
+        for template in templates:
+            self.template_combo.addItem(self._format_template_label(template), template.id)
+        self.use_template_button.setEnabled(True)
+        self.delete_template_button.setEnabled(True)
+
+    @staticmethod
+    def _format_template_label(template: TaskTemplate) -> str:
+        duration = (
+            f"{template.default_duration_minutes} 分钟"
+            if template.default_duration_minutes
+            else "不限时"
+        )
+        description = template.description.replace("\n", " ")
+        if len(description) > 42:
+            description = f"{description[:42]}..."
+        return f"{description} · {duration} · {template.use_count} 次"
+
+    def _selected_template(self) -> TaskTemplate | None:
+        template_id = self.template_combo.currentData()
+        if template_id is None:
+            return None
+        return self.task_templates.get(int(template_id))
+
+    def _use_selected_template(self) -> None:
+        template = self._selected_template()
+        if template is None:
+            self._set_state("请选择任务模板", "StatusBadgeWarn")
+            return
+
+        self.task_edit.setPlainText(template.description)
+        if template.default_duration_minutes is None:
+            self.duration_enabled.setChecked(False)
+        else:
+            self.duration_enabled.setChecked(True)
+            self.duration_spin.setValue(template.default_duration_minutes)
+        self.last_result_label.setText("已填入历史任务。")
+
+    def _save_current_template(self) -> None:
+        description = self.task_edit.toPlainText().strip()
+        if not description:
+            self._set_state("请先输入任务", "StatusBadgeWarn")
+            return
+
+        duration = self.duration_spin.value() if self.duration_enabled.isChecked() else None
+        try:
+            self.store.upsert_task_template(description, duration)
+        except Exception as exc:  # noqa: BLE001 - GUI boundary should surface storage errors.
+            QMessageBox.warning(self, "保存模板失败", str(exc))
+            return
+
+        self._refresh_task_templates()
+        self.last_result_label.setText("任务模板已保存。")
+
+    def _delete_selected_template(self) -> None:
+        template = self._selected_template()
+        if template is None:
+            self._set_state("请选择任务模板", "StatusBadgeWarn")
+            return
+
+        result = QMessageBox.question(
+            self,
+            "删除任务模板",
+            f"确定删除这个任务模板吗？\n\n{template.description}",
+        )
+        if result != QMessageBox.StandardButton.Yes:
+            return
+
+        self.store.delete_task_template(template.id)
+        self._refresh_task_templates()
+        self.last_result_label.setText("任务模板已删除。")
 
     def _open_settings(self) -> None:
         dialog = SettingsDialog(self.config, self)
@@ -349,6 +445,12 @@ class MainWindow(QMainWindow):
             datetime.now().astimezone() + timedelta(minutes=duration) if duration else None
         )
         self.pause_until = None
+
+        try:
+            self.store.record_task_used(description, duration)
+            self._refresh_task_templates()
+        except Exception as exc:  # noqa: BLE001
+            self.last_result_label.setText(f"任务历史记录失败：{exc}")
 
         try:
             self.ocr_engine = build_ocr_engine(self.config.ocr_engine)
