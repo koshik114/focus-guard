@@ -1,0 +1,129 @@
+Metadata-Version: 2.4
+Name: focus-guard
+Version: 0.1.0
+Summary: A Windows desktop focus monitor using local OCR and LLM-based judgment.
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: PySide6-Essentials>=6.7
+Requires-Dist: mss>=9.0
+Requires-Dist: Pillow>=10.0
+Requires-Dist: psutil>=5.9
+Requires-Dist: pywin32>=306; platform_system == "Windows"
+Requires-Dist: python-dotenv>=1.0
+Requires-Dist: rapidocr-onnxruntime>=1.3
+Requires-Dist: requests>=2.31
+Provides-Extra: dev
+Requires-Dist: ruff>=0.5; extra == "dev"
+Requires-Dist: pytest>=8.0; extra == "dev"
+
+# Focus Guard
+
+Focus Guard is a Windows desktop GUI application that checks whether the user is
+still focused on a user-defined task. It uses local screenshot OCR and an LLM
+classifier. The first version prioritizes local privacy and low recurring cost.
+
+## Confirmed MVP Scope
+
+- GUI style: light Notion / Linear-inspired productivity interface.
+- Platform: Windows desktop.
+- Runtime: source-based Python application; no `.exe` packaging in phase 1.
+- Check cadence: default 60 seconds.
+- Capture scope: primary monitor only.
+- OCR: RapidOCR first, with an interface that allows PaddleOCR later.
+- Screenshot storage: screenshots are not saved.
+- Stored evidence: active process, window title, OCR text, model judgment,
+  confidence, provider, raw response, reminder state, user feedback, and
+  false-positive notes.
+- Local model: Ollama `qwen3:1.7b`.
+- Cloud fallback: DeepSeek only when Ollama is unavailable or returns
+  `uncertain`.
+- Reminder: modal, always-on-top dialog requiring explicit feedback.
+- Tray: closing the main window minimizes the app to the system tray.
+
+## Setup
+
+Use Python 3.11 or newer.
+
+```powershell
+cd C:\Users\koshi\Desktop\focus-guard
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .
+```
+
+Prepare the local model:
+
+```powershell
+ollama pull qwen3:1.7b
+ollama serve
+```
+
+Create local configuration:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Then edit `.env` if needed. `.env` is ignored by Git.
+
+## Run
+
+```powershell
+python -m focus_guard.main
+```
+
+Or, after editable installation:
+
+```powershell
+focus-guard
+```
+
+## Environment Variables
+
+```text
+FOCUS_GUARD_OLLAMA_BASE_URL=http://localhost:11434
+FOCUS_GUARD_OLLAMA_MODEL=qwen3:1.7b
+DEEPSEEK_API_KEY=
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-chat
+FOCUS_GUARD_CHECK_INTERVAL_SECONDS=60
+FOCUS_GUARD_OCR_ENGINE=rapidocr
+```
+
+DeepSeek is optional. If `DEEPSEEK_API_KEY` is empty, the app will keep the
+decision local and return `uncertain` when Ollama is unavailable or inconclusive.
+
+## Data Policy
+
+The application does not save screenshots. It saves OCR text and judgment
+metadata to a local SQLite database under `data/`, which is ignored by Git.
+
+False-positive notes are saved because they are useful for later evaluation and
+possible local-model fine-tuning dataset construction.
+
+## Architecture
+
+```text
+src/focus_guard/
+├── config.py              # .env and runtime config
+├── models.py              # task, OCR, judgment, event data models
+├── storage.py             # SQLite event store
+├── services/
+│   ├── window.py          # active Windows foreground window
+│   ├── screenshot.py      # primary monitor capture
+│   ├── ocr.py             # OCR engine abstraction, RapidOCR implementation
+│   ├── llm.py             # Ollama-first, DeepSeek fallback classifier
+│   └── detector.py        # one detection cycle
+└── ui/
+    ├── main_window.py     # GUI, timer, tray, log table
+    ├── reminder_dialog.py # forced manual confirmation dialog
+    └── theme.py           # light modern QSS theme
+```
+
+## Next Implementation Steps
+
+1. Add lightweight rule-based pre-filtering before LLM calls.
+2. Add task templates and historical task reuse.
+3. Add settings page for model, interval, and fallback behavior.
+4. Add export for fine-tuning/evaluation JSONL.
+5. Add optional PaddleOCR backend when RapidOCR accuracy is insufficient.

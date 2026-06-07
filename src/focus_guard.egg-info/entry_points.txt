@@ -1,0 +1,2 @@
+[console_scripts]
+focus-guard = focus_guard.main:main
