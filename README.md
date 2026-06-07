@@ -24,6 +24,8 @@ classifier. The first version prioritizes local privacy and low recurring cost.
   `uncertain`.
 - Reminder: modal, always-on-top dialog requiring explicit feedback.
 - Tray: closing the main window minimizes the app to the system tray.
+- Settings: the GUI can edit runtime model, OCR, interval, vision, and DeepSeek
+  fallback settings. Saved settings are written to local `.env`.
 
 ## Setup
 
@@ -50,6 +52,8 @@ Copy-Item .env.example .env
 ```
 
 Then edit `.env` if needed. `.env` is ignored by Git.
+
+Most runtime settings can also be edited from the app's Settings dialog.
 
 ## Run
 
@@ -120,7 +124,7 @@ src/focus_guard/
 ## Next Implementation Steps
 
 1. Add task templates and historical task reuse.
-2. Add settings page for model, interval, and fallback behavior.
-3. Add export for fine-tuning/evaluation JSONL.
-4. Add optional PaddleOCR backend when RapidOCR accuracy is insufficient.
-5. Add evaluation reports for false positives and false negatives.
+2. Add export for fine-tuning/evaluation JSONL.
+3. Add optional PaddleOCR backend when RapidOCR accuracy is insufficient.
+4. Add evaluation reports for false positives and false negatives.
+5. Add single-instance protection and packaging for daily use.

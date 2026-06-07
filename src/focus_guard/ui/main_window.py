@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
@@ -26,13 +27,14 @@ from PySide6.QtWidgets import (
     QStyle,
 )
 
-from focus_guard.config import AppConfig
+from focus_guard.config import AppConfig, write_env_settings
 from focus_guard.models import DetectionEvent, FeedbackType, FocusStatus, FocusTask
 from focus_guard.services.detector import FocusDetector
 from focus_guard.services.llm import LlmRouter
 from focus_guard.services.ocr import OcrEngine, build_ocr_engine
 from focus_guard.storage import EventStore
 from focus_guard.ui.reminder_dialog import ReminderDialog
+from focus_guard.ui.settings_dialog import SettingsDialog
 
 
 class DetectionWorker(QThread):
@@ -115,6 +117,10 @@ class MainWindow(QMainWindow):
         self.model_label.setObjectName("Muted")
         self.model_label.setWordWrap(True)
         sidebar_layout.addWidget(self.model_label)
+
+        self.settings_button = QPushButton("设置")
+        self.settings_button.clicked.connect(self._open_settings)
+        sidebar_layout.addWidget(self.settings_button)
         sidebar_layout.addStretch()
 
         tray_hint = QLabel("关闭窗口会最小化到托盘")
@@ -261,6 +267,43 @@ class MainWindow(QMainWindow):
         self.status_label.style().unpolish(self.status_label)
         self.status_label.style().polish(self.status_label)
         self.metric_state_value.setText(text)
+
+    def _update_config_labels(self) -> None:
+        self.model_label.setText(
+            f"模型\n{self.config.ollama_model}\n\n"
+            f"OCR\n{self.config.ocr_engine}\n\n"
+            f"视觉模式\n{self.config.vision_mode}"
+        )
+        self.metric_model_value.setText(self.config.ollama_model)
+        self.metric_vision_value.setText(self.config.vision_mode)
+        self.metric_next_value.setText(f"{self.config.check_interval_seconds}s")
+        self.interval_label.setText(f"每 {self.config.check_interval_seconds} 秒检测一次")
+
+    def _open_settings(self) -> None:
+        dialog = SettingsDialog(self.config, self)
+        if not dialog.exec():
+            return
+
+        try:
+            write_env_settings(self.config.env_path, dialog.values().to_env())
+            self.config = AppConfig.from_env()
+            self.timer.setInterval(self.config.check_interval_seconds * 1000)
+            self._update_config_labels()
+            self._rebuild_detector_if_running()
+        except Exception as exc:  # noqa: BLE001 - settings save should surface all failures.
+            QMessageBox.warning(self, "设置保存失败", str(exc))
+            return
+
+        self.last_result_label.setText("设置已保存，并已应用到当前运行实例。")
+
+    def _rebuild_detector_if_running(self) -> None:
+        if self.current_task is None:
+            return
+        self.ocr_engine = build_ocr_engine(self.config.ocr_engine)
+        self.detector = FocusDetector(
+            ocr_engine=self.ocr_engine,
+            llm_router=LlmRouter(self.config),
+        )
 
     def _build_tray(self) -> None:
         icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)

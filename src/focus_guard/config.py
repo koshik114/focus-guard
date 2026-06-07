@@ -31,10 +31,12 @@ class AppConfig:
     vision_max_image_side: int
     vision_jpeg_quality: int
     data_dir: Path
+    env_path: Path
 
     @classmethod
     def from_env(cls) -> "AppConfig":
-        load_dotenv()
+        env_path = Path(".env").resolve()
+        load_dotenv(dotenv_path=env_path, override=True)
         data_dir = Path(os.getenv("FOCUS_GUARD_DATA_DIR", "data")).resolve()
         data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -55,4 +57,29 @@ class AppConfig:
             vision_max_image_side=max(480, _env_int("FOCUS_GUARD_VISION_MAX_IMAGE_SIDE", 1280)),
             vision_jpeg_quality=max(40, min(95, _env_int("FOCUS_GUARD_VISION_JPEG_QUALITY", 72))),
             data_dir=data_dir,
+            env_path=env_path,
         )
+
+
+def write_env_settings(env_path: Path, settings: dict[str, str]) -> None:
+    existing: dict[str, str] = {}
+    order: list[str] = []
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if key:
+                existing[key] = value.strip()
+                order.append(key)
+
+    existing.update(settings)
+    for key in settings:
+        if key not in order:
+            order.append(key)
+
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"{key}={existing[key]}" for key in order if key in existing]
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
