@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -38,7 +39,7 @@ from focus_guard.models import (
     TaskTemplate,
 )
 from focus_guard.services.detector import FocusDetector
-from focus_guard.services.llm import LlmRouter
+from focus_guard.services.llm import LlmRouter, summarize_false_positive_guidance
 from focus_guard.services.ocr import OcrEngine, build_ocr_engine
 from focus_guard.storage import EventStore
 from focus_guard.ui.reminder_dialog import ReminderDialog
@@ -82,6 +83,39 @@ class DeepSeekReviewWorker(QThread):
         self.finished_review.emit(self.event, judgment, self.note)
 
 
+class FalsePositiveSummaryWorker(QThread):
+    finished_summary = Signal(bool, str)
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        task_description: str,
+        examples: tuple[str, ...],
+    ) -> None:
+        super().__init__()
+        self.api_key = api_key
+        self.base_url = base_url
+        self.model = model
+        self.task_description = task_description
+        self.examples = examples
+
+    def run(self) -> None:
+        try:
+            summary = summarize_false_positive_guidance(
+                api_key=self.api_key,
+                base_url=self.base_url,
+                model=self.model,
+                task_description=self.task_description,
+                examples=self.examples,
+            )
+        except Exception as exc:  # noqa: BLE001 - GUI boundary should surface all failures.
+            self.finished_summary.emit(False, str(exc))
+            return
+        self.finished_summary.emit(True, summary)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config: AppConfig, store: EventStore) -> None:
         super().__init__()
@@ -97,6 +131,9 @@ class MainWindow(QMainWindow):
         self.next_detection_at: datetime | None = None
         self.worker: DetectionWorker | None = None
         self.deepseek_review_worker: DeepSeekReviewWorker | None = None
+        self.false_positive_summary_worker: FalsePositiveSummaryWorker | None = None
+        self.false_positive_summary_task_description: str | None = None
+        self.false_positive_summary_user_requested = False
         self.task_templates: dict[int, TaskTemplate] = {}
 
         self.setWindowTitle("Focus Guard")
@@ -209,49 +246,65 @@ class MainWindow(QMainWindow):
         self.task_edit.setFixedHeight(92)
         session_layout.addWidget(self.task_edit, 1, 0, 1, 4)
 
+        self.allowed_processes_edit = QLineEdit()
+        self.allowed_processes_edit.setPlaceholderText("允许进程，例如：Code.exe, chrome.exe")
+        session_layout.addWidget(self.allowed_processes_edit, 2, 0, 1, 2)
+
+        self.focus_keywords_edit = QLineEdit()
+        self.focus_keywords_edit.setPlaceholderText("专注关键词，例如：Focus Guard, Codex, PySide")
+        session_layout.addWidget(self.focus_keywords_edit, 2, 2, 1, 2)
+
+        self.correction_summary_edit = QLineEdit()
+        self.correction_summary_edit.setPlaceholderText("纠错规则摘要，可由 DeepSeek 根据误判说明归纳")
+        session_layout.addWidget(self.correction_summary_edit, 3, 0, 1, 3)
+
+        self.summarize_false_positive_button = QPushButton("归纳误判规则")
+        self.summarize_false_positive_button.clicked.connect(self._summarize_false_positive_rules)
+        session_layout.addWidget(self.summarize_false_positive_button, 3, 3)
+
         self.template_combo = QComboBox()
         self.template_combo.setMinimumContentsLength(28)
-        session_layout.addWidget(self.template_combo, 2, 0)
+        session_layout.addWidget(self.template_combo, 4, 0)
 
         self.use_template_button = QPushButton("使用")
         self.use_template_button.clicked.connect(self._use_selected_template)
-        session_layout.addWidget(self.use_template_button, 2, 1)
+        session_layout.addWidget(self.use_template_button, 4, 1)
 
         self.save_template_button = QPushButton("保存模板")
         self.save_template_button.clicked.connect(self._save_current_template)
-        session_layout.addWidget(self.save_template_button, 2, 2)
+        session_layout.addWidget(self.save_template_button, 4, 2)
 
         self.delete_template_button = QPushButton("删除")
         self.delete_template_button.clicked.connect(self._delete_selected_template)
-        session_layout.addWidget(self.delete_template_button, 2, 3)
+        session_layout.addWidget(self.delete_template_button, 4, 3)
 
         self.duration_enabled = QCheckBox("设置持续时间")
-        session_layout.addWidget(self.duration_enabled, 3, 0)
+        session_layout.addWidget(self.duration_enabled, 5, 0)
 
         self.duration_spin = QSpinBox()
         self.duration_spin.setRange(5, 480)
         self.duration_spin.setValue(60)
         self.duration_spin.setSuffix(" 分钟")
-        session_layout.addWidget(self.duration_spin, 3, 1)
+        session_layout.addWidget(self.duration_spin, 5, 1)
 
         self.interval_label = QLabel(f"每 {self.config.check_interval_seconds} 秒检测一次")
         self.interval_label.setObjectName("Muted")
-        session_layout.addWidget(self.interval_label, 3, 2, 1, 2)
+        session_layout.addWidget(self.interval_label, 5, 2, 1, 2)
 
         self.start_button = QPushButton("开始")
         self.start_button.setObjectName("PrimaryButton")
         self.start_button.clicked.connect(self._start_session)
-        session_layout.addWidget(self.start_button, 4, 0)
+        session_layout.addWidget(self.start_button, 6, 0)
 
         self.stop_button = QPushButton("停止")
         self.stop_button.clicked.connect(self._stop_session)
         self.stop_button.setEnabled(False)
-        session_layout.addWidget(self.stop_button, 4, 1)
+        session_layout.addWidget(self.stop_button, 6, 1)
 
         self.check_now_button = QPushButton("立即检测")
         self.check_now_button.clicked.connect(self._run_detection)
         self.check_now_button.setEnabled(False)
-        session_layout.addWidget(self.check_now_button, 4, 2)
+        session_layout.addWidget(self.check_now_button, 6, 2)
 
         status_panel = QFrame()
         status_panel.setObjectName("Panel")
@@ -390,6 +443,19 @@ class MainWindow(QMainWindow):
             description = f"{description[:42]}..."
         return f"{description} · {duration} · {template.use_count} 次"
 
+    @staticmethod
+    def _parse_rule_text(text: str) -> tuple[str, ...]:
+        items: list[str] = []
+        for raw in text.replace("，", ",").replace("\n", ",").split(","):
+            cleaned = raw.strip()
+            if cleaned and cleaned not in items:
+                items.append(cleaned)
+        return tuple(items)
+
+    @staticmethod
+    def _format_rule_text(values: tuple[str, ...]) -> str:
+        return ", ".join(values)
+
     def _selected_template(self) -> TaskTemplate | None:
         template_id = self.template_combo.currentData()
         if template_id is None:
@@ -403,6 +469,9 @@ class MainWindow(QMainWindow):
             return
 
         self.task_edit.setPlainText(template.description)
+        self.allowed_processes_edit.setText(self._format_rule_text(template.allowed_processes))
+        self.focus_keywords_edit.setText(self._format_rule_text(template.focus_keywords))
+        self.correction_summary_edit.setText(template.correction_summary or "")
         if template.default_duration_minutes is None:
             self.duration_enabled.setChecked(False)
         else:
@@ -417,8 +486,17 @@ class MainWindow(QMainWindow):
             return
 
         duration = self.duration_spin.value() if self.duration_enabled.isChecked() else None
+        allowed_processes = self._parse_rule_text(self.allowed_processes_edit.text())
+        focus_keywords = self._parse_rule_text(self.focus_keywords_edit.text())
+        correction_summary = self.correction_summary_edit.text().strip() or None
         try:
-            self.store.upsert_task_template(description, duration)
+            self.store.upsert_task_template(
+                description,
+                duration,
+                allowed_processes,
+                focus_keywords,
+                correction_summary,
+            )
         except Exception as exc:  # noqa: BLE001 - GUI boundary should surface storage errors.
             QMessageBox.warning(self, "保存模板失败", str(exc))
             return
@@ -443,6 +521,81 @@ class MainWindow(QMainWindow):
         self.store.delete_task_template(template.id)
         self._refresh_task_templates()
         self.last_result_label.setText("任务模板已删除。")
+
+    def _summarize_false_positive_rules(self) -> None:
+        description = self.task_edit.toPlainText().strip()
+        self._start_false_positive_summary(description, user_requested=True)
+
+    def _start_false_positive_summary(
+        self,
+        description: str,
+        user_requested: bool,
+    ) -> None:
+        if not description:
+            if user_requested:
+                self._set_state("请先输入任务", "StatusBadgeWarn")
+            return
+        if not self.config.deepseek_api_key:
+            if user_requested:
+                self.last_result_label.setText("DeepSeek API Key 未配置，无法归纳误判规则。")
+            return
+        if self.false_positive_summary_worker and self.false_positive_summary_worker.isRunning():
+            if user_requested:
+                self.last_result_label.setText("已有误判规则归纳任务正在运行。")
+            return
+
+        examples = self.store.list_false_positive_guidance(description, limit=10)
+        if not examples:
+            if user_requested:
+                self.last_result_label.setText("当前任务还没有可归纳的用户误判说明。")
+            return
+
+        self.false_positive_summary_task_description = description
+        self.false_positive_summary_user_requested = user_requested
+        self.summarize_false_positive_button.setEnabled(False)
+        self.false_positive_summary_worker = FalsePositiveSummaryWorker(
+            api_key=self.config.deepseek_api_key,
+            base_url=self.config.deepseek_base_url,
+            model=self.config.deepseek_model,
+            task_description=description,
+            examples=examples,
+        )
+        self.false_positive_summary_worker.finished_summary.connect(
+            self._handle_false_positive_summary
+        )
+        self.false_positive_summary_worker.start()
+        self.last_result_label.setText("正在调用 DeepSeek 归纳误判规则。")
+
+    def _handle_false_positive_summary(self, ok: bool, message: str) -> None:
+        self.summarize_false_positive_button.setEnabled(True)
+        description = self.false_positive_summary_task_description
+        user_requested = self.false_positive_summary_user_requested
+        self.false_positive_summary_task_description = None
+        self.false_positive_summary_user_requested = False
+
+        if not ok:
+            if user_requested:
+                QMessageBox.warning(self, "归纳误判规则失败", message)
+            else:
+                self.last_result_label.setText(f"任务结束后的误判规则归纳失败：{message}")
+            return
+
+        result = QMessageBox.question(
+            self,
+            "保存误判规则摘要",
+            f"DeepSeek 归纳出以下规则，是否保存到当前任务模板？\n\n{message}",
+        )
+        if result != QMessageBox.StandardButton.Yes:
+            self.last_result_label.setText("误判规则摘要未保存。")
+            return
+
+        self.correction_summary_edit.setText(message)
+        if description:
+            self.store.update_task_template_correction_summary(description, message)
+            self._refresh_task_templates()
+            if self.current_task and self.current_task.description == description:
+                self.current_task = replace(self.current_task, correction_summary=message)
+        self.last_result_label.setText("误判规则摘要已保存到任务模板。")
 
     def _open_settings(self) -> None:
         dialog = SettingsDialog(self.config, self)
@@ -509,7 +662,18 @@ class MainWindow(QMainWindow):
             return
 
         duration = self.duration_spin.value() if self.duration_enabled.isChecked() else None
-        self.current_task = FocusTask(description=description, duration_minutes=duration)
+        allowed_processes = self._parse_rule_text(self.allowed_processes_edit.text())
+        focus_keywords = self._parse_rule_text(self.focus_keywords_edit.text())
+        correction_summary = self.correction_summary_edit.text().strip() or None
+        feedback_guidance = self.store.list_false_positive_guidance(description)
+        self.current_task = FocusTask(
+            description=description,
+            duration_minutes=duration,
+            allowed_processes=allowed_processes,
+            focus_keywords=focus_keywords,
+            correction_summary=correction_summary,
+            feedback_guidance=feedback_guidance,
+        )
         self.session_ends_at = (
             datetime.now().astimezone() + timedelta(minutes=duration) if duration else None
         )
@@ -519,7 +683,13 @@ class MainWindow(QMainWindow):
         self.next_detection_at = None
 
         try:
-            self.store.record_task_used(description, duration)
+            self.store.record_task_used(
+                description,
+                duration,
+                allowed_processes,
+                focus_keywords,
+                correction_summary,
+            )
             self._refresh_task_templates()
         except Exception as exc:  # noqa: BLE001
             self.last_result_label.setText(f"任务历史记录失败：{exc}")
@@ -547,6 +717,8 @@ class MainWindow(QMainWindow):
         )
 
     def _stop_session(self) -> None:
+        ending_task_description = self.current_task.description if self.current_task else ""
+        self._start_false_positive_summary(ending_task_description, user_requested=False)
         self.timer.stop()
         self.current_task = None
         self.session_ends_at = None
@@ -599,6 +771,7 @@ class MainWindow(QMainWindow):
                         self.pause_until = now + timedelta(minutes=5)
                     elif result.feedback is FeedbackType.FALSE_POSITIVE:
                         self._suppress_similar_reminders(signature, now)
+                        self._refresh_current_feedback_guidance()
                         deepseek_review_request = (event, result.note)
         else:
             self.store.add_event(event)
@@ -654,6 +827,16 @@ class MainWindow(QMainWindow):
         self.suppressed_reminder_signature = signature
         self.suppressed_reminder_until = now + timedelta(
             minutes=SIMILAR_FALSE_POSITIVE_COOLDOWN_MINUTES
+        )
+
+    def _refresh_current_feedback_guidance(self) -> None:
+        if self.current_task is None:
+            return
+        self.current_task = replace(
+            self.current_task,
+            feedback_guidance=self.store.list_false_positive_guidance(
+                self.current_task.description
+            ),
         )
 
     def _start_deepseek_review(self, event: DetectionEvent, note: str | None) -> None:

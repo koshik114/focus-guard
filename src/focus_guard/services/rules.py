@@ -44,10 +44,16 @@ def rule_based_judgment(
     window: WindowSnapshot,
     ocr: OcrSnapshot,
 ) -> ModelJudgment | None:
+    allowed_process_hits = _match_allowed_processes(task, window)
+    if allowed_process_hits:
+        return _focused_rule("allowed_process", allowed_process_hits, 0.98)
+
     keywords = _extract_task_keywords(task.description)
+    keywords.extend(task.focus_keywords)
     if not keywords:
         return None
 
+    keywords = _dedupe_keywords(keywords)
     title_process = f"{window.process_name} {window.window_title}".casefold()
     ocr_text = ocr.text.casefold()
 
@@ -60,6 +66,19 @@ def rule_based_judgment(
         return _focused_rule("ocr_keyword", ocr_hits, 0.82)
 
     return None
+
+
+def _match_allowed_processes(task: FocusTask, window: WindowSnapshot) -> list[str]:
+    process = window.process_name.casefold()
+    title_process = f"{window.process_name} {window.window_title}".casefold()
+    hits: list[str] = []
+    for item in task.allowed_processes:
+        normalized = item.strip().casefold()
+        if not normalized:
+            continue
+        if normalized == process or normalized in title_process:
+            hits.append(item.strip())
+    return hits
 
 
 def _extract_task_keywords(description: str) -> list[str]:
@@ -82,6 +101,17 @@ def _extract_task_keywords(description: str) -> list[str]:
         if len(cleaned) >= 2 and cleaned not in deduped:
             deduped.append(cleaned)
     return deduped[:8]
+
+
+def _dedupe_keywords(keywords: list[str]) -> list[str]:
+    deduped: list[str] = []
+    for item in keywords:
+        cleaned = item.strip()
+        if len(cleaned) >= 2 and cleaned.casefold() not in {
+            existing.casefold() for existing in deduped
+        }:
+            deduped.append(cleaned)
+    return deduped[:16]
 
 
 def _focused_rule(rule_name: str, hits: list[str], confidence: float) -> ModelJudgment:

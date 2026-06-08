@@ -21,6 +21,10 @@ class FeedbackType(StrEnum):
 class FocusTask:
     description: str
     duration_minutes: int | None = None
+    allowed_processes: tuple[str, ...] = ()
+    focus_keywords: tuple[str, ...] = ()
+    correction_summary: str | None = None
+    feedback_guidance: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -28,6 +32,9 @@ class TaskTemplate:
     id: int
     description: str
     default_duration_minutes: int | None
+    allowed_processes: tuple[str, ...]
+    focus_keywords: tuple[str, ...]
+    correction_summary: str | None
     use_count: int
     updated_at: datetime
     last_used_at: datetime | None

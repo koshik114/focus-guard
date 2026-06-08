@@ -18,7 +18,9 @@ JSON 格式：
 1. 查资料、阅读文档、看课程视频可能属于 focused，不能机械判定为 distracted。
 2. 游戏、短视频娱乐、社交闲聊、购物等和任务无关时通常属于 distracted。
 3. 证据不足时输出 uncertain。
-4. 第一字符必须是 {，最后字符必须是 }。
+4. allowed_processes、focus_keywords、task_correction_summary 是当前任务规则，可作为判断依据。
+5. previous_false_positive_guidance 是用户过去确认的误判纠错提示，只能作为参考，不能当作当前屏幕事实。
+6. 第一字符必须是 {，最后字符必须是 }。
 """
 
 
@@ -53,6 +55,60 @@ def test_deepseek_connection(
     data = response.json()
     content = data["choices"][0]["message"]["content"]
     return f"DeepSeek 连通正常，模型返回：{content.strip()[:40]}"
+
+
+def summarize_false_positive_guidance(
+    api_key: str,
+    base_url: str,
+    model: str,
+    task_description: str,
+    examples: tuple[str, ...],
+    timeout_seconds: int = 40,
+) -> str:
+    if not api_key.strip():
+        raise ValueError("DeepSeek API Key 为空")
+    if not examples:
+        raise ValueError("没有可归纳的误判说明")
+
+    payload = {
+        "model": model.strip() or "deepseek-chat",
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "你是专注检测应用的规则归纳器。"
+                    "根据用户确认的误判样本，归纳一条短中文规则。"
+                    "不要写完整 prompt，不要输出 Markdown，不要编号。"
+                    "规则必须保守，不能把明显娱乐、购物、社交闲聊也放宽为专注。"
+                    "长度控制在 80 个汉字以内。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "task": task_description,
+                        "false_positive_examples": list(examples[:10]),
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+        "temperature": 0,
+        "max_tokens": 120,
+    }
+    response = requests.post(
+        f"{base_url.strip().rstrip('/')}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key.strip()}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    content = response.json()["choices"][0]["message"]["content"]
+    return content.strip().strip("`").strip()
 
 
 @dataclass(frozen=True)
@@ -259,6 +315,10 @@ class LlmRouter:
                 "window_title": window.window_title,
                 "ocr_engine": ocr.engine,
                 "ocr_text": ocr_text,
+                "allowed_processes": list(task.allowed_processes),
+                "focus_keywords": list(task.focus_keywords),
+                "task_correction_summary": task.correction_summary or "",
+                "previous_false_positive_guidance": list(task.feedback_guidance[:6]),
             },
             ensure_ascii=False,
         )

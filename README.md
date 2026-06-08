@@ -25,8 +25,18 @@ classifier. The first version prioritizes local privacy and low recurring cost.
 - Cloud fallback: DeepSeek only when Ollama is unavailable or returns
   `uncertain`.
 - Reminder: modal, always-on-top dialog requiring explicit feedback.
+- Immediate reminder policy: a distracted judgment still opens the reminder
+  immediately; false-positive controls reduce repeated or predictable mistakes,
+  not the first warning.
+- Task rules: each task can define allowed processes and focus keywords that
+  short-circuit model judgment as focused when matched.
 - False-positive cooldown: choosing "这是误判" suppresses the same
   task/process/window reminder for 15 minutes while detection logs continue.
+- False-positive guidance: recent user-written false-positive notes for the
+  same task are injected into later model prompts as bounded correction context.
+- False-positive summarization: when a task ends, DeepSeek can summarize recent
+  false-positive notes into one short task rule. The app asks before saving the
+  summary to the task template.
 - DeepSeek review: when "这是误判" is selected and `DEEPSEEK_API_KEY` is
   configured, DeepSeek rechecks the same event in the background and stores a
   `deepseek-review` log row.
@@ -68,7 +78,7 @@ Most runtime settings can also be edited from the app's Settings dialog.
 
 The task panel also includes a local history/template selector. Starting a task
 records it for later reuse; pressing "保存模板" updates the saved default
-duration for the current task.
+duration, allowed processes, and focus keywords for the current task.
 
 ## Run
 
@@ -115,7 +125,8 @@ Ollama, and then discarded. The database stores only OCR text and judgment
 metadata under `data/`, which is ignored by Git.
 
 Task templates are stored in the same local SQLite database. They contain task
-descriptions, optional default durations, use counts, and last-used timestamps.
+descriptions, optional default durations, allowed processes, focus keywords,
+DeepSeek-generated correction summaries, use counts, and last-used timestamps.
 
 False-positive notes are saved because they are useful for later evaluation and
 possible local-model fine-tuning dataset construction.
@@ -146,4 +157,4 @@ src/focus_guard/
 2. Add optional PaddleOCR backend when RapidOCR accuracy is insufficient.
 3. Add evaluation reports for false positives and false negatives.
 4. Add single-instance protection and packaging for daily use.
-5. Add richer per-task rules, such as allowed apps and task keywords.
+5. Add richer per-task reports and automatic rule suggestions.
