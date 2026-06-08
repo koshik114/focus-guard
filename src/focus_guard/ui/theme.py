@@ -222,5 +222,17 @@ def apply_light_theme(app: QApplication) -> None:
             font-weight: 600;
             color: #52525b;
         }
+
+        QProgressBar {
+            background: #f4f4f5;
+            border: 1px solid #e4e4e7;
+            border-radius: 6px;
+            height: 12px;
+        }
+
+        QProgressBar::chunk {
+            background: #2563eb;
+            border-radius: 5px;
+        }
         """
     )

@@ -77,10 +77,13 @@ def summarize_false_positive_guidance(
                 "role": "system",
                 "content": (
                     "你是专注检测应用的规则归纳器。"
-                    "根据用户确认的误判样本，归纳一条短中文规则。"
-                    "不要写完整 prompt，不要输出 Markdown，不要编号。"
+                    "所有 false_positive_examples 都是用户确认的误判，"
+                    "它们的正确标签应为 focused。"
+                    "你的任务是归纳一条“以后遇到类似情况时应判为专注”的短规则。"
+                    "必须以正向规则表达，不能输出“不视为专注”“排除”“不算专注”等反向规则。"
+                    "不要采纳错误模型原因本身，只能用它理解误判来源。"
                     "规则必须保守，不能把明显娱乐、购物、社交闲聊也放宽为专注。"
-                    "长度控制在 80 个汉字以内。"
+                    "只输出 JSON：{\"rule\":\"80 个汉字以内的中文规则\"}。"
                 ),
             },
             {
@@ -96,6 +99,7 @@ def summarize_false_positive_guidance(
         ],
         "temperature": 0,
         "max_tokens": 120,
+        "response_format": {"type": "json_object"},
     }
     response = requests.post(
         f"{base_url.strip().rstrip('/')}/chat/completions",
@@ -108,7 +112,38 @@ def summarize_false_positive_guidance(
     )
     response.raise_for_status()
     content = response.json()["choices"][0]["message"]["content"]
-    return content.strip().strip("`").strip()
+    rule = _parse_summary_rule(content)
+    _validate_summary_rule(rule)
+    return rule
+
+
+def _parse_summary_rule(content: str) -> str:
+    stripped = content.strip().strip("`").strip()
+    try:
+        start = stripped.find("{")
+        end = stripped.rfind("}") + 1
+        data = json.loads(stripped[start:end])
+        rule = str(data.get("rule", "")).strip()
+    except (TypeError, ValueError, json.JSONDecodeError):
+        rule = stripped
+    return rule
+
+
+def _validate_summary_rule(rule: str) -> None:
+    if not rule:
+        raise ValueError("DeepSeek 未返回有效规则")
+    negative_markers = (
+        "不视为专注",
+        "不算专注",
+        "不是专注",
+        "不应判为专注",
+        "不判为专注",
+        "视为分心",
+        "判为分心",
+        "排除",
+    )
+    if any(marker in rule for marker in negative_markers):
+        raise ValueError(f"DeepSeek 返回了反向规则，请重新归纳：{rule}")
 
 
 @dataclass(frozen=True)

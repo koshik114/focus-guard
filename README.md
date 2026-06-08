@@ -47,6 +47,11 @@ classifier. The first version prioritizes local privacy and low recurring cost.
   configured DeepSeek API Key, base URL, and model are reachable.
 - Task templates: started tasks are recorded as local history, and the GUI can
   reuse, save, or delete task templates.
+- Log analysis: the GUI can open a local analytics window showing focus rate,
+  distraction rate, false-positive rate, uncertain rate, provider/process
+  distributions, and recent distraction/false-positive samples.
+- JSONL export: the Log Analysis window can export the current filtered events
+  to local JSONL for evaluation and later fine-tuning dataset preparation.
 
 ## Setup
 
@@ -131,6 +136,17 @@ DeepSeek-generated correction summaries, use counts, and last-used timestamps.
 False-positive notes are saved because they are useful for later evaluation and
 possible local-model fine-tuning dataset construction.
 
+The Log Analysis window reads the same SQLite database and does not send data to
+any model. It supports time-range and task filters so you can inspect whether
+the detector is becoming more accurate for a specific recurring task.
+
+The JSONL export writes one detection event per line. It includes task text,
+window metadata, OCR text, model judgment, reminder state, user feedback, and a
+derived `final_label`. User feedback has priority: a user-confirmed
+false-positive reminder is exported as `focused`, a confirmed distraction is
+exported as `distracted`, and unreviewed focused/distracted model judgments are
+marked as weak labels. `uncertain` events are exported as unlabeled examples.
+
 ## Architecture
 
 ```text
@@ -145,6 +161,7 @@ src/focus_guard/
 │   ├── llm.py             # Ollama-first, DeepSeek fallback classifier
 │   └── detector.py        # one detection cycle
 └── ui/
+    ├── analysis_dialog.py # local log analysis dashboard
     ├── main_window.py     # GUI, timer, tray, log table
     ├── settings_dialog.py # runtime settings dialog
     ├── reminder_dialog.py # forced manual confirmation dialog
@@ -153,8 +170,8 @@ src/focus_guard/
 
 ## Next Implementation Steps
 
-1. Add export for fine-tuning/evaluation JSONL.
-2. Add optional PaddleOCR backend when RapidOCR accuracy is insufficient.
-3. Add evaluation reports for false positives and false negatives.
-4. Add single-instance protection and packaging for daily use.
-5. Add richer per-task reports and automatic rule suggestions.
+1. Add optional PaddleOCR backend when RapidOCR accuracy is insufficient.
+2. Add model-assisted evaluation reports for false positives and false negatives.
+3. Add single-instance protection and packaging for daily use.
+4. Add richer per-task reports and automatic rule suggestions.
+5. Add dataset cleanup tools for weak-label filtering and prompt-format export.

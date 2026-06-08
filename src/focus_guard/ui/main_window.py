@@ -42,6 +42,7 @@ from focus_guard.services.detector import FocusDetector
 from focus_guard.services.llm import LlmRouter, summarize_false_positive_guidance
 from focus_guard.services.ocr import OcrEngine, build_ocr_engine
 from focus_guard.storage import EventStore
+from focus_guard.ui.analysis_dialog import LogAnalysisDialog
 from focus_guard.ui.reminder_dialog import ReminderDialog
 from focus_guard.ui.settings_dialog import SettingsDialog
 
@@ -184,6 +185,10 @@ class MainWindow(QMainWindow):
         self.settings_button = QPushButton("设置")
         self.settings_button.clicked.connect(self._open_settings)
         sidebar_layout.addWidget(self.settings_button)
+
+        self.analysis_button = QPushButton("日志分析")
+        self.analysis_button.clicked.connect(self._open_log_analysis)
+        sidebar_layout.addWidget(self.analysis_button)
         sidebar_layout.addStretch()
 
         tray_hint = QLabel("关闭窗口会最小化到托盘")
@@ -613,6 +618,11 @@ class MainWindow(QMainWindow):
             return
 
         self.last_result_label.setText("设置已保存，并已应用到当前运行实例。")
+
+    def _open_log_analysis(self) -> None:
+        self._refresh_recent_events()
+        dialog = LogAnalysisDialog(self.store, self)
+        dialog.exec()
 
     def _rebuild_detector_if_running(self) -> None:
         if self.current_task is None:

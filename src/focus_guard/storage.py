@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import replace
 from datetime import datetime
@@ -175,6 +176,240 @@ class EventStore:
                 )
             )
 
+    @staticmethod
+    def _analysis_where_clause(
+        since: datetime | None,
+        task_description: str | None,
+    ) -> tuple[str, tuple[object, ...]]:
+        filters: list[str] = []
+        params: list[object] = []
+        if since is not None:
+            filters.append("captured_at >= ?")
+            params.append(since.isoformat())
+        if task_description:
+            filters.append("task_description = ?")
+            params.append(task_description)
+
+        if not filters:
+            return "", ()
+        return "WHERE " + " AND ".join(filters), tuple(params)
+
+    def list_event_tasks(self, limit: int = 80) -> list[str]:
+        with self._connect() as connection:
+            rows = list(
+                connection.execute(
+                    """
+                    SELECT task_description
+                    FROM detection_events
+                    GROUP BY task_description
+                    ORDER BY MAX(id) DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+            )
+        return [str(row["task_description"]) for row in rows]
+
+    def analysis_summary(
+        self,
+        since: datetime | None = None,
+        task_description: str | None = None,
+    ) -> sqlite3.Row:
+        where_clause, params = self._analysis_where_clause(since, task_description)
+        with self._connect() as connection:
+            return connection.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS total,
+                    COALESCE(SUM(CASE WHEN status = 'focused' THEN 1 ELSE 0 END), 0)
+                        AS focused,
+                    COALESCE(SUM(CASE WHEN status = 'distracted' THEN 1 ELSE 0 END), 0)
+                        AS distracted,
+                    COALESCE(SUM(CASE WHEN status = 'uncertain' THEN 1 ELSE 0 END), 0)
+                        AS uncertain,
+                    COALESCE(SUM(
+                        CASE
+                            WHEN user_feedback = 'false_positive'
+                                 AND reminder_shown = 1
+                            THEN 1
+                            ELSE 0
+                        END
+                    ), 0) AS false_positive
+                FROM detection_events
+                {where_clause}
+                """,
+                params,
+            ).fetchone()
+
+    def analysis_counts(
+        self,
+        column: str,
+        since: datetime | None = None,
+        task_description: str | None = None,
+        limit: int = 8,
+    ) -> list[sqlite3.Row]:
+        allowed_columns = {"provider", "process_name", "task_description", "status"}
+        if column not in allowed_columns:
+            raise ValueError(f"Unsupported analysis column: {column}")
+
+        where_clause, params = self._analysis_where_clause(since, task_description)
+        with self._connect() as connection:
+            return list(
+                connection.execute(
+                    f"""
+                    SELECT COALESCE(NULLIF(TRIM({column}), ''), '未知') AS label,
+                           COUNT(*) AS count
+                    FROM detection_events
+                    {where_clause}
+                    GROUP BY label
+                    ORDER BY count DESC, label ASC
+                    LIMIT ?
+                    """,
+                    (*params, limit),
+                )
+            )
+
+    def analysis_false_positives(
+        self,
+        since: datetime | None = None,
+        task_description: str | None = None,
+        limit: int = 12,
+    ) -> list[sqlite3.Row]:
+        where_clause, params = self._analysis_where_clause(since, task_description)
+        feedback_filter = "user_feedback = 'false_positive' AND reminder_shown = 1"
+        if where_clause:
+            where_clause = f"{where_clause} AND {feedback_filter}"
+        else:
+            where_clause = f"WHERE {feedback_filter}"
+
+        with self._connect() as connection:
+            return list(
+                connection.execute(
+                    f"""
+                    SELECT captured_at, process_name, window_title, feedback_note
+                    FROM detection_events
+                    {where_clause}
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (*params, limit),
+                )
+            )
+
+    def analysis_distractions(
+        self,
+        since: datetime | None = None,
+        task_description: str | None = None,
+        limit: int = 12,
+    ) -> list[sqlite3.Row]:
+        where_clause, params = self._analysis_where_clause(since, task_description)
+        status_filter = "status = 'distracted'"
+        if where_clause:
+            where_clause = f"{where_clause} AND {status_filter}"
+        else:
+            where_clause = f"WHERE {status_filter}"
+
+        with self._connect() as connection:
+            return list(
+                connection.execute(
+                    f"""
+                    SELECT captured_at, confidence, process_name, reason
+                    FROM detection_events
+                    {where_clause}
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (*params, limit),
+                )
+            )
+
+    def analysis_export_events(
+        self,
+        since: datetime | None = None,
+        task_description: str | None = None,
+    ) -> list[sqlite3.Row]:
+        where_clause, params = self._analysis_where_clause(since, task_description)
+        with self._connect() as connection:
+            return list(
+                connection.execute(
+                    f"""
+                    SELECT *
+                    FROM detection_events
+                    {where_clause}
+                    ORDER BY id ASC
+                    """,
+                    params,
+                )
+            )
+
+    def export_evaluation_jsonl(
+        self,
+        output_path: Path,
+        since: datetime | None = None,
+        task_description: str | None = None,
+    ) -> int:
+        rows = self.analysis_export_events(
+            since=since,
+            task_description=task_description,
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", encoding="utf-8", newline="\n") as file:
+            for row in rows:
+                file.write(
+                    json.dumps(
+                        self._event_row_to_export_record(row),
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+        return len(rows)
+
+    @staticmethod
+    def _event_row_to_export_record(row: sqlite3.Row) -> dict[str, object]:
+        final_label, label_source = EventStore._derive_final_label(row)
+        return {
+            "schema_version": 1,
+            "event_id": row["id"],
+            "captured_at": row["captured_at"],
+            "task": {
+                "description": row["task_description"],
+                "duration_minutes": row["task_duration_minutes"],
+            },
+            "window": {
+                "app_name": row["app_name"],
+                "process_name": row["process_name"],
+                "window_title": row["window_title"],
+            },
+            "ocr": {
+                "engine": row["ocr_engine"],
+                "text": row["ocr_text"],
+            },
+            "model_judgment": {
+                "status": row["status"],
+                "confidence": row["confidence"],
+                "reason": row["reason"],
+                "provider": row["provider"],
+                "vision_used": bool(row["vision_used"]),
+                "raw_response": row["raw_response"],
+            },
+            "reminder_shown": bool(row["reminder_shown"]),
+            "user_feedback": row["user_feedback"],
+            "feedback_note": row["feedback_note"],
+            "final_label": final_label,
+            "label_source": label_source,
+        }
+
+    @staticmethod
+    def _derive_final_label(row: sqlite3.Row) -> tuple[str | None, str]:
+        user_feedback = row["user_feedback"]
+        if user_feedback == FeedbackType.FALSE_POSITIVE.value and row["reminder_shown"]:
+            return "focused", "user_false_positive"
+        if user_feedback == FeedbackType.CONFIRMED_DISTRACTION.value:
+            return "distracted", "user_confirmed"
+        if row["status"] in {"focused", "distracted"}:
+            return row["status"], "model_weak"
+        return None, "unlabeled"
+
     def list_false_positive_guidance(
         self,
         task_description: str,
@@ -188,6 +423,7 @@ class EventStore:
                     FROM detection_events
                     WHERE task_description = ?
                       AND user_feedback = ?
+                      AND reminder_shown = 1
                       AND feedback_note IS NOT NULL
                       AND TRIM(feedback_note) != ''
                       AND feedback_note NOT LIKE 'DeepSeek 误判复核%'
@@ -205,7 +441,9 @@ class EventStore:
             reason = row["reason"] or ""
             note = row["feedback_note"] or ""
             guidance.append(
-                f"曾误判：进程={process}；窗口={title}；模型原因={reason}；用户说明={note}"
+                "用户确认这是误判，正确标签应为 focused："
+                f"进程={process}；窗口={title}；"
+                f"错误模型原因={reason}；用户纠正说明={note}"
             )
         return tuple(guidance)
 
